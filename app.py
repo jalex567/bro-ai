@@ -11,8 +11,10 @@ from sklearn.pipeline import Pipeline
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.utils.class_weight import compute_class_weight
+import joblib  # Import joblib
 import io
 import base64
+import os
 
 # Set page config
 st.set_page_config(
@@ -36,9 +38,19 @@ st.markdown("""
 st.markdown('<h1 class="main-header">🚗 Accident Severity Prediction System</h1>', unsafe_allow_html=True)
 st.write("This application predicts accident severity using a Random Forest model with class balancing.")
 
-# Sidebar for data upload
+# Initialize session state for model persistence
+if 'model_trained' not in st.session_state:
+    st.session_state.model_trained = False
+if 'clf' not in st.session_state:
+    st.session_state.clf = None
+
+# Sidebar for data upload and model management
 st.sidebar.title("Data Input")
 uploaded_file = st.sidebar.file_uploader("Upload your CSV data file", type=["csv"])
+
+# Model management section
+st.sidebar.title("Model Management")
+randomforest_file = st.sidebar.file_uploader("Upload a trained model (joblib)", type=["joblib"])
 
 # Function to load sample data if no file is uploaded
 @st.cache_data
@@ -72,6 +84,15 @@ if uploaded_file is not None:
 else:
     df = load_sample_data()
     st.sidebar.info("Using sample data for demonstration.")
+
+# Load model if provided
+if fandomforest_file is not None:
+    try:
+        st.session_state.clf = joblib.load(randomforest_file)
+        st.session_state.model_trained = True
+        st.sidebar.success("Model loaded successfully!")
+    except Exception as e:
+        st.sidebar.error(f"Error loading model: {e}")
 
 # Show data preview
 if st.sidebar.checkbox("Show Data Preview"):
@@ -156,18 +177,19 @@ st.write("Class weights:", class_weight_dict)
 # -----------------------------
 # Full pipeline with class weighting
 # -----------------------------
-clf = Pipeline(steps=[
-    ('preprocessor', preprocessor),
-    ('classifier', RandomForestClassifier(
-        n_estimators=100,
-        random_state=42,
-        class_weight=class_weight_dict,
-        max_depth=10,
-        min_samples_split=5,
-        min_samples_leaf=2,
-        n_jobs=-1
-    ))
-])
+if st.session_state.clf is None:
+    st.session_state.clf = Pipeline(steps=[
+        ('preprocessor', preprocessor),
+        ('classifier', RandomForestClassifier(
+            n_estimators=100,
+            random_state=42,
+            class_weight=class_weight_dict,
+            max_depth=10,
+            min_samples_split=5,
+            min_samples_leaf=2,
+            n_jobs=-1
+        ))
+    ])
 
 # -----------------------------
 # Train/test split with stratification
@@ -181,13 +203,19 @@ X_train, X_test, y_train, y_test = train_test_split(
 # -----------------------------
 if st.button('Train Model'):
     with st.spinner('Training model with class balancing...'):
-        clf.fit(X_train, y_train)
+        st.session_state.clf.fit(X_train, y_train)
+        st.session_state.model_trained = True
         st.success('Model training completed!')
+        
+        # Save model button
+        if st.button('Save Model'):
+            joblib.dump(st.session_state.clf, 'accident_severity_model.joblib')
+            st.success('Model saved as accident_severity_model.joblib')
         
         # -----------------------------
         # Predictions and evaluation
         # -----------------------------
-        y_pred = clf.predict(X_test)
+        y_pred = st.session_state.clf.predict(X_test)
         
         st.markdown('<h2 class="sub-header">Model Evaluation</h2>', unsafe_allow_html=True)
         
@@ -303,14 +331,14 @@ if st.button('Train Model'):
         # -----------------------------
         try:
             # Get feature importance from the model
-            importances = clf.named_steps['classifier'].feature_importances_
+            importances = st.session_state.clf.named_steps['classifier'].feature_importances_
             
             # Get feature names after preprocessing
-            numeric_features = clf.named_steps['preprocessor'].transformers_[0][2]
-            categorical_features = clf.named_steps['preprocessor'].transformers_[1][2]
+            numeric_features = st.session_state.clf.named_steps['preprocessor'].transformers_[0][2]
+            categorical_features = st.session_state.clf.named_steps['preprocessor'].transformers_[1][2]
             
             # Get one-hot encoded feature names
-            ohe = clf.named_steps['preprocessor'].transformers_[1][1].named_steps['onehot']
+            ohe = st.session_state.clf.named_steps['preprocessor'].transformers_[1][1].named_steps['onehot']
             categorical_feature_names = ohe.get_feature_names_out(categorical_features)
             
             # Combine all feature names
@@ -336,7 +364,7 @@ if st.button('Train Model'):
 # -----------------------------
 st.markdown('<h2 class="sub-header">Make Predictions</h2>', unsafe_allow_html=True)
 
-if 'clf' in locals() and hasattr(clf, 'fit'):
+if st.session_state.model_trained:
     # Create input form for prediction
     with st.form("prediction_form"):
         st.write("Enter feature values for prediction:")
@@ -347,13 +375,17 @@ if 'clf' in locals() and hasattr(clf, 'fit'):
         with col1:
             for feature in numeric_features:
                 if feature != 'Severity':
-                    input_data[feature] = st.number_input(feature, value=0.0)
+                    # Set default values based on sample data statistics
+                    if feature in df.columns:
+                        default_val = df[feature].median() if df[feature].dtype != 'object' else df[feature].mode()[0]
+                        input_data[feature] = st.number_input(feature, value=float(default_val))
         
         with col2:
             for feature in categorical_features:
                 if feature in df.columns:
                     options = df[feature].unique().tolist()
-                    input_data[feature] = st.selectbox(feature, options)
+                    default_val = df[feature].mode()[0] if len(options) > 0 else None
+                    input_data[feature] = st.selectbox(feature, options, index=options.index(default_val) if default_val in options else 0)
         
         submitted = st.form_submit_button("Predict Severity")
         
@@ -363,13 +395,13 @@ if 'clf' in locals() and hasattr(clf, 'fit'):
             
             # Make prediction
             try:
-                prediction = clf.predict(input_df)
+                prediction = st.session_state.clf.predict(input_df)
                 st.success(f"Predicted Severity: {prediction[0]}")
                 
                 # Show prediction probabilities
-                probabilities = clf.predict_proba(input_df)
+                probabilities = st.session_state.clf.predict_proba(input_df)
                 prob_df = pd.DataFrame({
-                    'Severity': clf.classes_,
+                    'Severity': st.session_state.clf.classes_,
                     'Probability': probabilities[0]
                 }).sort_values('Probability', ascending=False)
                 
